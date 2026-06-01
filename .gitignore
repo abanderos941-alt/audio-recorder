@@ -1,0 +1,17 @@
+# Recordings (private audio files)
+recordings/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# Settings (contain local paths, device indices)
+recorder_settings.json
+
+# macOS
+.DS_Store
