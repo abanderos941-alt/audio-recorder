@@ -194,6 +194,9 @@ class RecorderApp(tk.Tk):
         self._btn_full_browse = ttk.Button(frm_fdir, text='Обзор',
                                             command=self._browse_full)
         self._btn_full_browse.pack(side='left', padx=(6, 0))
+        self._btn_full_open = ttk.Button(frm_fdir, text='📂 Открыть',
+                                          command=self._open_full_dir)
+        self._btn_full_open.pack(side='left', padx=(4, 0))
         ttk.Label(frm_fdir, text='  (пусто = та же папка что и rec_*)',
                   foreground=hint_fg).pack(side='left')
 
@@ -287,6 +290,9 @@ class RecorderApp(tk.Tk):
         self._lbl_file_time = ttk.Label(frm_status, text='', font=('Consolas', 10),
                                          foreground='#cc0000')
         self._lbl_file_time.pack(side='left', padx=(10, 0))
+        self._btn_delete = ttk.Button(frm_status, text='🗑 Удалить',
+                                      command=self._delete_recorded, state='disabled')
+        self._btn_delete.pack(side='left', padx=(12, 0))
 
         # ── Saved files list ──────────────────────────────────────────────────
         frm_files = ttk.LabelFrame(self, text='Записанные файлы', padding=6)
@@ -388,6 +394,11 @@ class RecorderApp(tk.Tk):
         if d:
             self._var_full_dir.set(d)
 
+    def _open_full_dir(self):
+        d = self._var_full_dir.get().strip() or self._var_dir.get().strip() or str(Path(__file__).parent / 'recordings')
+        Path(d).mkdir(parents=True, exist_ok=True)
+        os.startfile(d)
+
     def _on_format_changed(self, *_):
         is_wav = self._var_format.get() == 'wav'
         self._cb_bitrate.config(state='disabled' if is_wav else 'readonly')
@@ -438,6 +449,28 @@ class RecorderApp(tk.Tk):
             if os.path.isfile(p):
                 os.startfile(p)
 
+    def _delete_recorded(self):
+        files = [f for f in self._saved_files if os.path.isfile(f)]
+        if not files:
+            return
+        n = len(files)
+        if not messagebox.askokcancel('Удалить файлы',
+                                      f'Удалить {n} записанных файл(ов)?'):
+            return
+        errors = []
+        for f in files:
+            try:
+                os.remove(f)
+            except OSError as e:
+                errors.append(f'{os.path.basename(f)}: {e}')
+        self._saved_files.clear()
+        self._listbox.delete(0, tk.END)
+        self._btn_delete.config(state='disabled')
+        if errors:
+            self._set_status(f'Ошибка удаления: {os.path.basename(errors[0])}', '#cc0000')
+        else:
+            self._set_status(f'Удалено {n} файл(ов)', '#555555')
+
     # ── Recording ─────────────────────────────────────────────────────────────
 
     def _toggle(self):
@@ -462,6 +495,7 @@ class RecorderApp(tk.Tk):
         self._settings = s
         self._saved_files.clear()
         self._listbox.delete(0, tk.END)
+        self._btn_delete.config(state='disabled')
         self._reset_meters()
 
         min_speech_dur = s['min_speech_duration'] if s['min_speech_enabled'] else 0.0
@@ -517,6 +551,7 @@ class RecorderApp(tk.Tk):
         self._dot.config(fg='#aaaaaa')
         self._set_status(f'Готово. Сохранено файлов: {n}',
                          '#005500' if n else '#555555')
+        self._btn_delete.config(state='normal' if n else 'disabled')
         self._reset_meters()
         self._stop_timer()
 
