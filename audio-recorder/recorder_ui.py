@@ -33,7 +33,7 @@ DEFAULT_SETTINGS: dict = {
     'mic_device_index':     -1,
     'sys_device_index':     -1,
     'meter_max':            2000,
-    'auto_mic_on_level':    False,
+    'auto_mic_on_level':    True,
 }
 
 
@@ -92,7 +92,7 @@ class RecorderApp(tk.Tk):
         frm_dir = ttk.Frame(frm)
         frm_dir.grid(row=0, column=1, **wdg_kw)
         self._var_dir = tk.StringVar()
-        ttk.Entry(frm_dir, textvariable=self._var_dir, width=38).pack(side='left')
+        ttk.Entry(frm_dir, textvariable=self._var_dir, width=30).pack(side='left')
         ttk.Button(frm_dir, text='Обзор', command=self._browse).pack(side='left', padx=(6, 0))
 
         # Порог тишины
@@ -191,7 +191,7 @@ class RecorderApp(tk.Tk):
         frm_fdir = ttk.Frame(frm)
         frm_fdir.grid(row=9, column=1, **wdg_kw)
         self._var_full_dir = tk.StringVar()
-        self._entry_full_dir = ttk.Entry(frm_fdir, textvariable=self._var_full_dir, width=38)
+        self._entry_full_dir = ttk.Entry(frm_fdir, textvariable=self._var_full_dir, width=30)
         self._entry_full_dir.pack(side='left')
         self._btn_full_browse = ttk.Button(frm_fdir, text='Обзор',
                                             command=self._browse_full)
@@ -199,8 +199,6 @@ class RecorderApp(tk.Tk):
         self._btn_full_open = ttk.Button(frm_fdir, text='📂 Открыть',
                                           command=self._open_full_dir)
         self._btn_full_open.pack(side='left', padx=(4, 0))
-        ttk.Label(frm_fdir, text='  (пусто = та же папка что и rec_*)',
-                  foreground=hint_fg).pack(side='left')
 
         # Разделитель
         ttk.Separator(frm, orient='horizontal').grid(
@@ -212,7 +210,7 @@ class RecorderApp(tk.Tk):
         frm_mic_dev.grid(row=11, column=1, **wdg_kw)
         self._var_mic_device = tk.StringVar()
         self._cb_mic = ttk.Combobox(frm_mic_dev, textvariable=self._var_mic_device,
-                                     width=56, state='readonly')
+                                     width=40, state='readonly')
         self._cb_mic.pack(side='left')
         ttk.Button(frm_mic_dev, text='↻', width=3,
                    command=self._scan_devices).pack(side='left', padx=(6, 0))
@@ -223,11 +221,8 @@ class RecorderApp(tk.Tk):
         frm_sys_dev.grid(row=12, column=1, **wdg_kw)
         self._var_sys_device = tk.StringVar()
         self._cb_sys = ttk.Combobox(frm_sys_dev, textvariable=self._var_sys_device,
-                                     width=56, state='readonly')
+                                     width=40, state='readonly')
         self._cb_sys.pack(side='left')
-        ttk.Label(frm_sys_dev,
-                  text='  ← для RDP: выбери VB-Cable или нужный loopback',
-                  foreground=hint_fg).pack(side='left')
 
         # ── Controls ──────────────────────────────────────────────────────────
         frm_ctrl = ttk.Frame(self)
@@ -285,7 +280,7 @@ class RecorderApp(tk.Tk):
         ttk.Spinbox(frm_max, from_=100, to=32768, increment=100,
                     textvariable=self._var_meter_max, width=7).pack(side='left', padx=(6, 0))
         ttk.Label(frm_max,
-                  text='  RMS    │ белая черта = порог тишины │ зелёный < порог, жёлтый ≈ порог, красный > порог',
+                  text='  белая черта = порог тишины',
                   foreground=hint_fg).pack(side='left')
 
         # ── Status row ────────────────────────────────────────────────────────
@@ -552,7 +547,10 @@ class RecorderApp(tk.Tk):
 
         self._recording = True
         self._btn.config(text='  ■  Остановить запись  ')
-        self._update_mic_btn(False)
+        # Старт с замьюченным микрофоном если включён авто-вкл
+        start_muted = self._var_auto_mic.get()
+        self._recorder._mic_muted = start_muted
+        self._update_mic_btn(start_muted)
         self._btn_mic_mute.config(state='normal')
         self._chk_auto_mic.config(state='normal')
         self._set_status('Ожидание речи...', '#888888')
@@ -566,7 +564,12 @@ class RecorderApp(tk.Tk):
         self._set_status('Остановка...', '#e07000')
 
         def _do():
-            files = self._recorder.stop() if self._recorder else []
+            try:
+                files = self._recorder.stop() if self._recorder else []
+            except Exception as e:
+                files = []
+                self.after(0, lambda: messagebox.showerror(
+                    'Ошибка остановки', str(e)))
             self.after(0, self._on_stopped, files)
 
         threading.Thread(target=_do, daemon=True).start()
