@@ -450,26 +450,26 @@ class RecorderApp(tk.Tk):
                 os.startfile(p)
 
     def _delete_recorded(self):
-        files = [f for f in self._saved_files if os.path.isfile(f)]
-        if not files:
+        wav_files = [f for f in self._saved_files
+                     if os.path.isfile(f) and f.lower().endswith('.wav')]
+        if not wav_files:
+            messagebox.showinfo('Удаление', 'WAV-файлы не найдены.')
             return
-        n = len(files)
-        if not messagebox.askokcancel('Удалить файлы',
-                                      f'Удалить {n} записанных файл(ов)?'):
+        n = len(wav_files)
+        if not messagebox.askokcancel('Удалить WAV-файлы',
+                                      f'Удалить {n} WAV-файл(ов)?'):
             return
         errors = []
-        for f in files:
+        for f in wav_files:
             try:
                 os.remove(f)
             except OSError as e:
                 errors.append(f'{os.path.basename(f)}: {e}')
-        self._saved_files.clear()
-        self._listbox.delete(0, tk.END)
-        self._btn_delete.config(state='disabled')
         if errors:
             self._set_status(f'Ошибка удаления: {os.path.basename(errors[0])}', '#cc0000')
         else:
-            self._set_status(f'Удалено {n} файл(ов)', '#555555')
+            self._set_status(f'Удалено {n} WAV-файл(ов)', '#555555')
+            self._btn_delete.config(state='disabled')
 
     # ── Recording ─────────────────────────────────────────────────────────────
 
