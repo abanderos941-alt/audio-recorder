@@ -68,11 +68,14 @@ class RecorderApp(tk.Tk):
         self._record_start_time: float | None = None
         self._file_start_time:   float | None = None
         self._timer_job: str | None = None
+        self._countdown_job: str | None = None
+        self._countdown_sec: int = 0
         self._settings = _load_settings()
         self._build_ui()
         self._load_into_ui()
         self._scan_devices()
         self.protocol('WM_DELETE_WINDOW', self._on_close)
+        self.after(200, self._start_countdown)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -242,8 +245,8 @@ class RecorderApp(tk.Tk):
                                              font=('Segoe UI', 9),
                                              fg='#555555', selectcolor='#e8ffe8')
         self._chk_auto_mic.pack(side='left', padx=(8, 0))
-        self._lbl_total_time = ttk.Label(frm_ctrl, text='', font=('Consolas', 10),
-                                          foreground='#888888')
+        self._lbl_total_time = ttk.Label(frm_ctrl, text='', font=('Consolas', 11),
+                                          foreground='#e07000')
         self._lbl_total_time.pack(side='right', padx=(0, 12))
 
         # ── Meters frame ──────────────────────────────────────────────────────
@@ -293,9 +296,12 @@ class RecorderApp(tk.Tk):
         self._lbl_file_time = ttk.Label(frm_status, text='', font=('Consolas', 10),
                                          foreground='#cc0000')
         self._lbl_file_time.pack(side='left', padx=(10, 0))
-        self._btn_delete = ttk.Button(frm_status, text='🗑 Удалить',
+        self._btn_delete = ttk.Button(frm_status, text='🗑 Удалить WAV',
                                       command=self._delete_recorded, state='disabled')
         self._btn_delete.pack(side='left', padx=(12, 0))
+        self._btn_delete_mp3 = ttk.Button(frm_status, text='🗑 Удалить MP3',
+                                           command=self._delete_mp3, state='disabled')
+        self._btn_delete_mp3.pack(side='left', padx=(6, 0))
         ttk.Button(frm_status, text='📂 Открыть папку',
                    command=self._open_folder).pack(side='left', padx=(6, 0))
 
@@ -471,8 +477,9 @@ class RecorderApp(tk.Tk):
             messagebox.showinfo('Удаление', 'WAV-файлы не найдены.')
             return
         n = len(wav_files)
+        paths_text = '\n'.join(wav_files)
         if not messagebox.askokcancel('Удалить WAV-файлы',
-                                      f'Удалить {n} WAV-файл(ов)?'):
+                                      f'Удалить {n} WAV-файл(ов)?\n\n{paths_text}'):
             return
         errors = []
         for f in wav_files:
@@ -486,9 +493,56 @@ class RecorderApp(tk.Tk):
             self._set_status(f'Удалено {n} WAV-файл(ов)', '#555555')
             self._btn_delete.config(state='disabled')
 
+    def _delete_mp3(self):
+        mp3_files = [f for f in self._saved_files
+                     if os.path.isfile(f) and f.lower().endswith('.mp3')]
+        if not mp3_files:
+            messagebox.showinfo('Удаление', 'MP3-файлы не найдены.')
+            return
+        paths_text = '\n'.join(mp3_files)
+        if not messagebox.askokcancel('Удалить MP3-файлы',
+                                      f'Удалить {len(mp3_files)} MP3-файл(ов)?\n\n{paths_text}'):
+            return
+        errors = []
+        for f in mp3_files:
+            try:
+                os.remove(f)
+            except OSError as e:
+                errors.append(f'{f}: {e}')
+        if errors:
+            self._set_status(f'Ошибка удаления: {os.path.basename(errors[0])}', '#cc0000')
+        else:
+            self._set_status(f'Удалено {len(mp3_files)} MP3-файл(ов)', '#555555')
+            self._btn_delete_mp3.config(state='disabled')
+
+    # ── Countdown autostart ───────────────────────────────────────────────────
+
+    def _start_countdown(self):
+        self._countdown_sec = 3
+        self._tick_countdown()
+
+    def _tick_countdown(self):
+        if self._countdown_sec <= 0:
+            self._countdown_job = None
+            self._start()
+            return
+        self._btn.config(text=f'  ✕  Отмена  ({self._countdown_sec})')
+        self._countdown_sec -= 1
+        self._countdown_job = self.after(1000, self._tick_countdown)
+
+    def _cancel_countdown(self):
+        if self._countdown_job:
+            self.after_cancel(self._countdown_job)
+            self._countdown_job = None
+        self._btn.config(text='  ●  Начать запись  ')
+        self._countdown_sec = 0
+
     # ── Recording ─────────────────────────────────────────────────────────────
 
     def _toggle(self):
+        if self._countdown_job:
+            self._cancel_countdown()
+            return
         if not self._recording:
             self._start()
         else:
@@ -517,6 +571,7 @@ class RecorderApp(tk.Tk):
         self._saved_files.clear()
         self._listbox.delete(0, tk.END)
         self._btn_delete.config(state='disabled')
+        self._btn_delete_mp3.config(state='disabled')
         self._reset_meters()
 
         min_speech_dur = s['min_speech_duration'] if s['min_speech_enabled'] else 0.0
@@ -584,7 +639,10 @@ class RecorderApp(tk.Tk):
         self._dot.config(fg='#aaaaaa')
         self._set_status(f'Готово. Сохранено файлов: {n}',
                          '#005500' if n else '#555555')
-        self._btn_delete.config(state='normal' if n else 'disabled')
+        has_wav = any(f.lower().endswith('.wav') for f in self._saved_files)
+        has_mp3 = any(f.lower().endswith('.mp3') for f in self._saved_files)
+        self._btn_delete.config(state='normal' if has_wav else 'disabled')
+        self._btn_delete_mp3.config(state='normal' if has_mp3 else 'disabled')
         self._reset_meters()
         self._stop_timer()
 
@@ -755,6 +813,8 @@ class RecorderApp(tk.Tk):
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def _on_close(self):
+        if self._countdown_job:
+            self.after_cancel(self._countdown_job)
         if self._recording and self._recorder:
             self._recorder.stop()
         self.destroy()
