@@ -81,6 +81,7 @@ class Recorder:
                  output_format: str = 'mp3',
                  full_record: bool = False,
                  full_output_dir: str | Path = '',
+                 fragment_record: bool = True,
                  mic_device: int | None = None,
                  sys_device: int | None = None,
                  on_status=None,
@@ -111,6 +112,7 @@ class Recorder:
         self._full_record       = full_record
         _fod = Path(full_output_dir) if full_output_dir else self._output_dir
         self._full_output_dir   = _fod
+        self._fragment_record   = fragment_record
         self._mic_device        = mic_device   # None = auto, int = device index
         self._sys_device        = sys_device   # None = auto, int = device index
         self._on_status         = on_status        # (msg: str) -> None
@@ -268,9 +270,8 @@ class Recorder:
 
         # ── Full continuous recording setup ───────────────────────────────────
         full_path      = None
-        full_enc       = None   # lameenc.Encoder  (MP3 mode)
-        full_wav       = None   # wave.Wave_write  (WAV mode)
-        full_fh        = None   # raw file handle  (MP3 mode)
+        full_enc       = None   # lameenc.Encoder
+        full_fh        = None   # raw file handle
         full_frames    = 0      # frame counter for duration
 
         if self._full_record:
@@ -337,10 +338,11 @@ class Recorder:
                 pre_roll.append(mixed.tobytes())
                 if level >= self._silence_rms:
                     state = SPEECH
-                    current_path = self._make_path()  # timestamp = actual speech start
+                    current_path = self._make_path() if self._fragment_record else None
                     frames = list(pre_roll)   # prepend pre-roll to capture onset
                     file_start = time.monotonic()
-                    self._emit(f"  [REC] {current_path}")
+                    if current_path:
+                        self._emit(f"  [REC] {current_path}")
 
             # ── SPEECH ────────────────────────────────────────────────────────
             elif state == SPEECH:
@@ -362,7 +364,7 @@ class Recorder:
                         keep = min(silent_count, self._post_roll_chunks)
                         trim = silent_count - keep
                         speech_frames = frames[:-trim] if trim > 0 else frames
-                        if len(speech_frames) >= self._min_speech_chunks:
+                        if self._fragment_record and len(speech_frames) >= self._min_speech_chunks:
                             self._save(speech_frames, current_path)
                             self.saved_files.append(current_path)
                         frames = []
@@ -379,7 +381,7 @@ class Recorder:
             keep = min(sc, self._post_roll_chunks)
             trim = sc - keep
             speech_frames = frames[:-trim] if trim > 0 else frames
-            if len(speech_frames) >= self._min_speech_chunks:
+            if self._fragment_record and len(speech_frames) >= self._min_speech_chunks:
                 self._save(speech_frames, current_path)
                 self.saved_files.append(current_path)
 
@@ -444,15 +446,24 @@ class Recorder:
         else:
             self._emit("[SYSTEM] no loopback found -- mic only")
 
-        threading.Thread(target=self._t_mic, args=(mic_stream,), daemon=True).start()
+        self._mic_t = threading.Thread(target=self._t_mic, args=(mic_stream,), daemon=True)
+        self._mic_t.start()
+        self._sys_t = None
         if sys_stream:
-            threading.Thread(target=self._t_sys, args=(sys_stream,), daemon=True).start()
+            self._sys_t = threading.Thread(target=self._t_sys, args=(sys_stream,), daemon=True)
+            self._sys_t.start()
         self._mixer_t = threading.Thread(target=self._t_mixer, daemon=True)
         self._mixer_t.start()
 
     def stop(self) -> list[str]:
         self._running = False
         self._mixer_t.join(timeout=10)
+        # Дождаться закрытия mic/sys стримов ДО pa.terminate() — иначе terminate()
+        # может выполниться, пока другой поток ещё блокирован внутри stream.read()
+        # на живом стриме этого же PyAudio-хоста, что роняет процесс access violation'ом.
+        self._mic_t.join(timeout=5)
+        if self._sys_t:
+            self._sys_t.join(timeout=5)
         self._pa.terminate()
         return self.saved_files
 
