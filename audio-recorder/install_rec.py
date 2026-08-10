@@ -1,10 +1,11 @@
 """
-Установщик зависимостей для аудио-рекордера.
+Установщик зависимостей для аудио-рекордера. Самодостаточный файл —
+список пакетов зашит внутри, ничего не читает из других файлов проекта.
 
 Проверяет требования системы (Windows, версия Python, tkinter, pip),
-устанавливает недостающие пакеты из requirements.txt и проверяет, что
-после установки всё импортируется и WASAPI видит хотя бы одно устройство.
-Ничего не удаляет, не трогает recorder_settings.json и существующие записи.
+устанавливает недостающие пакеты и проверяет, что после установки всё
+импортируется и WASAPI видит хотя бы одно устройство. Ничего не удаляет,
+не трогает recorder_settings.json и существующие записи.
 
 Запуск:
     python install_rec.py
@@ -15,7 +16,6 @@ import importlib
 import platform
 import subprocess
 import sys
-from pathlib import Path
 
 REQUIRED_PACKAGES = {
     'pyaudiowpatch': 'pyaudiowpatch>=0.2.12',
@@ -23,7 +23,6 @@ REQUIRED_PACKAGES = {
     'numpy':         'numpy>=1.24',
 }
 MIN_PYTHON = (3, 10)
-HERE = Path(__file__).parent
 
 
 def _ok(msg: str) -> None:
@@ -90,19 +89,24 @@ def check_pip() -> bool:
         return False
 
 
-def installed_packages() -> dict[str, bool]:
+def check_imports(verbose: bool = False) -> dict[str, bool]:
+    importlib.invalidate_caches()  # иначе только что поставленный пакет может не найтись в этом же процессе
     result = {}
     for mod_name in REQUIRED_PACKAGES:
         try:
             importlib.import_module(mod_name)
             result[mod_name] = True
-        except ImportError:
+            if verbose:
+                _ok(f'{mod_name} импортируется')
+        except ImportError as e:
             result[mod_name] = False
+            if verbose:
+                _fail(f'{mod_name} не импортируется: {e}')
     return result
 
 
 def install_missing(missing: list[str]) -> bool:
-    _step('Установка недостающих пакетов: ' + ', '.join(missing) + '...')
+    _step('Устанавливаю...')
     specs = [REQUIRED_PACKAGES[name] for name in missing]
     proc = subprocess.run([sys.executable, '-m', 'pip', 'install', *specs])
     if proc.returncode != 0:
@@ -110,20 +114,6 @@ def install_missing(missing: list[str]) -> bool:
         return False
     _ok('Установка завершена')
     return True
-
-
-def verify_imports() -> bool:
-    _step('Проверка импорта после установки...')
-    importlib.invalidate_caches()  # иначе только что поставленный пакет может не найтись в этом же процессе
-    all_ok = True
-    for mod_name in REQUIRED_PACKAGES:
-        try:
-            importlib.import_module(mod_name)
-            _ok(f'{mod_name} импортируется')
-        except ImportError as e:
-            _fail(f'{mod_name} не импортируется: {e}')
-            all_ok = False
-    return all_ok
 
 
 def check_audio_devices() -> None:
@@ -175,7 +165,7 @@ def main() -> int:
         _step('Без pip установить зависимости не получится — установка прервана.')
         return 1
 
-    missing = [name for name, ok in installed_packages().items() if not ok]
+    missing = [name for name, ok in check_imports().items() if not ok]
     if not missing:
         _step('Все Python-пакеты уже установлены.')
     else:
@@ -188,7 +178,8 @@ def main() -> int:
         else:
             _step('Установка пропущена — пакеты не скачаны и не установлены.')
 
-    imports_ok = verify_imports()
+    _step('Проверка импорта после установки...')
+    imports_ok = all(check_imports(verbose=True).values())
     check_audio_devices()
 
     print('\n' + '=' * 60)

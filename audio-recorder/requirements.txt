@@ -1,3 +1,0 @@
-pyaudiowpatch>=0.2.12
-lameenc>=1.7
-numpy>=1.24

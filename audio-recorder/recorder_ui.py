@@ -10,14 +10,23 @@ import subprocess
 import time
 import threading
 import tkinter as tk
+import urllib.parse
+import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from recorder import Recorder
 
 SETTINGS_FILE = Path(__file__).parent / 'recorder_settings.json'
 
 METER_W, METER_H = 320, 20   # размер Canvas-баров в пикселях
+
+INVALID_NAME_CHARS = set('<>:"/\\|?*')
+RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL',
+                   *(f'COM{i}' for i in range(1, 10)),
+                   *(f'LPT{i}' for i in range(1, 10))}
+
+TRANSCRIPT_FIXER_URL = 'http://127.0.0.1:5000'
 
 DEFAULT_SETTINGS: dict = {
     'output_dir':              str(Path(__file__).parent / 'recordings'),
@@ -349,10 +358,11 @@ class RecorderApp(tk.Tk):
         self._listbox.pack(side='left', fill='both', expand=True)
         sb.pack(side='right', fill='y')
         self._listbox.bind('<Double-Button-1>', self._open_file)
+        self._listbox.bind('<Button-3>', self._on_file_right_click)
 
-        self._lbl_files_hint = ttk.Label(self, text='Двойной клик по файлу — открыть',
-                                          foreground='#888888', font=('Segoe UI', 8),
-                                          padding=(0, 0))
+        self._lbl_files_hint = ttk.Label(
+            self, text='Двойной клик — открыть · правая кнопка — переименовать',
+            foreground='#888888', font=('Segoe UI', 8), padding=(0, 0))
         self._lbl_files_hint.grid(row=5, column=0, sticky='w', pady=(0, 4))
 
         self._apply_settings_panel_visibility()
@@ -594,6 +604,117 @@ class RecorderApp(tk.Tk):
                                      creationflags=subprocess.CREATE_NO_WINDOW)
                 except Exception:
                     pass
+
+    def _on_file_right_click(self, event):
+        if self._listbox.size() == 0:
+            return
+        idx = self._listbox.nearest(event.y)
+        bbox = self._listbox.bbox(idx)
+        if not bbox or not (bbox[1] <= event.y <= bbox[1] + bbox[3]):
+            return
+        self._listbox.selection_clear(0, tk.END)
+        self._listbox.selection_set(idx)
+        self._listbox.activate(idx)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label='✏ Переименовать', command=self._rename_selected_file)
+        menu.add_separator()
+        menu.add_command(label='📤 Отправить в Transcript Fixer',
+                          command=self._send_to_transcript_fixer)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _rename_selected_file(self):
+        sel = self._listbox.curselection()
+        if not sel or sel[0] >= len(self._saved_files):
+            return
+        idx = sel[0]
+        old = Path(self._saved_files[idx])
+        if not old.is_file():
+            messagebox.showerror('Переименование', 'Файл не найден на диске.')
+            return
+
+        new_stem = simpledialog.askstring(
+            'Переименовать', 'Новое имя файла (без расширения):',
+            initialvalue=old.stem, parent=self)
+        if new_stem is None:
+            return
+        new_stem = new_stem.strip()
+        if not new_stem:
+            messagebox.showerror('Переименование', 'Имя не может быть пустым.')
+            return
+        if set(new_stem) & INVALID_NAME_CHARS:
+            messagebox.showerror('Переименование',
+                                  'Имя содержит недопустимые символы: < > : " / \\ | ? *')
+            return
+        if new_stem.upper() in RESERVED_NAMES:
+            messagebox.showerror('Переименование',
+                                  f'"{new_stem}" — зарезервированное имя в Windows.')
+            return
+
+        new_path = old.with_name(new_stem + old.suffix)
+        if new_path.name == old.name:
+            return
+        if new_path.exists() and new_path.name.lower() != old.name.lower():
+            messagebox.showerror('Переименование', f'Файл "{new_path.name}" уже существует.')
+            return
+
+        try:
+            old.rename(new_path)
+        except OSError as e:
+            messagebox.showerror('Переименование', f'Не удалось переименовать: {e}')
+            return
+
+        self._saved_files[idx] = str(new_path)
+        rest = self._listbox.get(idx)[48:]   # длительность + размер — без изменений
+        self._listbox.delete(idx)
+        self._listbox.insert(idx, f'{new_path.name:<46}  {rest}')
+        self._listbox.selection_set(idx)
+        self._set_status(f'Переименовано: {new_path.name}', '#006600')
+
+    def _send_to_transcript_fixer(self):
+        sel = self._listbox.curselection()
+        if not sel or sel[0] >= len(self._saved_files):
+            return
+        path = self._saved_files[sel[0]]
+        if not os.path.isfile(path):
+            messagebox.showerror('Transcript Fixer', 'Файл не найден на диске.')
+            return
+        name = Path(path).name
+        self._open_transcript_fixer(path, name)
+        self._set_status(f'Transcript Fixer: отправлено в очередь — {name}', '#e07000')
+
+    def _open_transcript_fixer(self, server_path: str = '', filename: str = ''):
+        # Тот же способ открытия, что и в собственном start_app.bat у Transcript
+        # Fixer (отдельное окно приложения через --app=, не обычная вкладка) —
+        # иначе выглядит как "чужой" браузер/профиль. addfile в URL подхватывает
+        # app.js и кладёт файл в ту же очередь распознавания, что и autoscan/
+        # ручное добавление (без включения самого режима autoscan), поэтому
+        # там же честно применяются все настройки — авто-анализ, авто-замена,
+        # авто-саммари.
+        url = TRANSCRIPT_FIXER_URL
+        if server_path:
+            st = os.stat(server_path)
+            params = {
+                'addfile': server_path,
+                'filename': filename,
+                'size': str(st.st_size),
+                'created': str(int(st.st_mtime)),
+            }
+            url += '/?' + urllib.parse.urlencode(params)
+        candidates = [
+            os.environ.get('ProgramFiles', '') + r'\Google\Chrome\Application\chrome.exe',
+            os.environ.get('ProgramFiles(x86)', '') + r'\Google\Chrome\Application\chrome.exe',
+            os.environ.get('LocalAppData', '') + r'\Google\Chrome\Application\chrome.exe',
+            os.environ.get('ProgramFiles(x86)', '') + r'\Microsoft\Edge\Application\msedge.exe',
+            os.environ.get('ProgramFiles', '') + r'\Microsoft\Edge\Application\msedge.exe',
+        ]
+        for exe in candidates:
+            if os.path.isfile(exe):
+                subprocess.Popen([exe, f'--app={url}'])
+                return
+        webbrowser.open(url)
 
     def _delete_by_ext(self, ext: str, label: str, btn: ttk.Button):
         files = [f for f in self._saved_files
