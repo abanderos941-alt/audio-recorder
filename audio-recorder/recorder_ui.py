@@ -17,6 +17,20 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from recorder import Recorder
 
 SETTINGS_FILE = Path(__file__).parent / 'recorder_settings.json'
+ICON_FILE = Path(__file__).parent / 'icon.ico'
+APP_USER_MODEL_ID = 'AudioRecorder.RecorderUI.1'
+
+
+def _set_windows_app_id():
+    # Без этого Windows группирует окно под иконкой python.exe в панели задач,
+    # ПОЛНОСТЬЮ ИГНОРИРУЯ iconbitmap()/iconphoto() — таскбар берёт иконку по
+    # AppUserModelID процесса, а не по иконке окна. Обязательно вызывать до
+    # создания первого окна (Tk()).
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 METER_W, METER_H = 320, 16   # размер Canvas-баров в пикселях (высота canvas уменьшена на 1px сверху и снизу)
 METER_SEGMENTS, METER_GAP = 30, 2   # число LED-сегментов эквалайзера и зазор между ними (px)
@@ -61,8 +75,14 @@ def _save_settings(s: dict) -> None:
 
 class RecorderApp(tk.Tk):
     def __init__(self):
+        _set_windows_app_id()  # обязательно до создания первого окна (см. комментарий выше)
         super().__init__()
         self.title('Аудио Рекордер')
+        if ICON_FILE.is_file():
+            try:
+                self.iconbitmap(default=str(ICON_FILE))
+            except tk.TclError:
+                pass
         self.resizable(False, False)
         self.lift()
         self.attributes('-topmost', True)
@@ -265,7 +285,7 @@ class RecorderApp(tk.Tk):
         self._btn_dot = tk.Canvas(self._btn, width=16, height=16,
                                    highlightthickness=0, bg='#e0e0e0')
         self._btn_dot.pack(side='left', padx=(6, 4))
-        self._btn_dot_id = self._btn_dot.create_oval(2, 2, 14, 14, fill='#cc3333', outline='')
+        self._btn_dot_id = self._btn_dot.create_oval(3, 3, 13, 13, fill='#cc3333', outline='')
         self._btn_label = tk.Label(self._btn, text='Начать запись',
                                     bg='#e0e0e0', font=('Segoe UI', 8))
         self._btn_label.pack(side='left', padx=(0, 6))
@@ -728,8 +748,7 @@ class RecorderApp(tk.Tk):
         if not enabled:
             bg, dot_color = '#d5d5d5', '#aaaaaa'
         else:
-            bg = '#ffe3e3' if recording else '#e0e0e0'   # очень светло-красный — идёт запись
-            dot_color = '#cc3333'
+            bg, dot_color = '#e0e0e0', '#cc3333'
         self._btn.config(bg=bg)
         self._btn_dot.config(bg=bg)
         self._btn_dot.delete('all')
@@ -737,7 +756,7 @@ class RecorderApp(tk.Tk):
             self._btn_dot_id = self._btn_dot.create_rectangle(3, 3, 13, 13,
                                                                 fill=dot_color, outline='')
         else:
-            self._btn_dot_id = self._btn_dot.create_oval(2, 2, 14, 14,
+            self._btn_dot_id = self._btn_dot.create_oval(3, 3, 13, 13,
                                                           fill=dot_color, outline='')
         self._btn_label.config(text=text, bg=bg)
         if recording and enabled:
