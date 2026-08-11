@@ -4,7 +4,6 @@ GUI для аудио-рекордера: микрофон + системный 
 from __future__ import annotations
 
 import json
-import math
 import os
 import subprocess
 import time
@@ -19,7 +18,8 @@ from recorder import Recorder
 
 SETTINGS_FILE = Path(__file__).parent / 'recorder_settings.json'
 
-METER_W, METER_H = 320, 20   # размер Canvas-баров в пикселях
+METER_W, METER_H = 320, 16   # размер Canvas-баров в пикселях (высота canvas уменьшена на 1px сверху и снизу)
+METER_SEGMENTS, METER_GAP = 30, 2   # число LED-сегментов эквалайзера и зазор между ними (px)
 
 INVALID_NAME_CHARS = set('<>:"/\\|?*')
 RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL',
@@ -71,38 +71,38 @@ class RecorderApp(tk.Tk):
         self._recorder: Recorder | None = None
         self._recording = False
         self._saved_files: list[str] = []
-        self._blink_job: str | None = None
-        self._blink_state = False
-        self._blink_color = 'gray'
+        self._btn_pulse_job: str | None = None
+        self._btn_pulse_step = 0
         self._mic_device_map: dict[str, int | None] = {}
         self._sys_device_map: dict[str, int | None] = {}
         self._record_start_time: float | None = None
-        self._file_start_time:   float | None = None
         self._timer_job: str | None = None
-        self._countdown_job: str | None = None
-        self._countdown_sec: int = 0
         self._settings = _load_settings()
         self._settings_visible = self._settings.get('settings_panel_visible', True)
         self._build_ui()
         self._load_into_ui()
         self._scan_devices()
         self.protocol('WM_DELETE_WINDOW', self._on_close)
-        self.after(200, self._start_countdown)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
         # pady у root не умеет в асимметричный (top, bottom) — задаём отступы
         # сверху/снизу явно на первом и последнем виджетах грида вместо этого.
-        self.configure(padx=16)
+        self.configure(padx=8)
+
+        # Компактная тема: уменьшенный базовый шрифт для всех ttk-виджетов
+        # (Label/Button/Checkbutton/Combobox/Entry/Spinbox/LabelFrame-заголовок).
+        style = ttk.Style(self)
+        style.configure('.', font=('Segoe UI', 8))
 
         # ── Settings frame (сворачивается кнопкой-шестерёнкой в строке управления) ─
-        frm = ttk.LabelFrame(self, padding=(12, 8))
-        frm.grid(row=0, column=0, sticky='ew', pady=(14, 10))
+        frm = ttk.LabelFrame(self, padding=(8, 4))
+        frm.grid(row=0, column=0, sticky='ew', pady=(6, 4))
         self._frm_settings = frm
 
-        lbl_kw  = {'sticky': 'w', 'pady': 5}
-        wdg_kw  = {'sticky': 'w', 'padx': (10, 0), 'pady': 5}
+        lbl_kw  = {'sticky': 'w', 'pady': 2}
+        wdg_kw  = {'sticky': 'w', 'padx': (6, 0), 'pady': 2}
         hint_fg = '#888888'
 
         # Папка для записи (основной непрерывный файл full_*, всегда включена)
@@ -214,7 +214,7 @@ class RecorderApp(tk.Tk):
                                              format='%.1f', textvariable=self._var_min_record,
                                              width=7)
         self._spbx_min_record.pack(side='left')
-        ttk.Label(frm_mr, text='  мин (0 = выкл) — не реагировать на тишину N минут с начала файла',
+        ttk.Label(frm_mr, text='  мин (0 = выкл) — не реагировать на тишину N минут',
                   foreground=hint_fg).pack(side='left')
 
         # Формат файла
@@ -226,12 +226,12 @@ class RecorderApp(tk.Tk):
                                         values=['mp3', 'wav'], width=6, state='readonly')
         self._cb_format.pack(side='left')
         ttk.Label(frm_fmt,
-                  text='    WAV = без сжатия, лучше для Whisper  |  MP3 = меньше размер',
+                  text='    WAV = без сжатия  |  MP3 = меньше размер',
                   foreground=hint_fg).pack(side='left')
 
         # Разделитель
         ttk.Separator(frm, orient='horizontal').grid(
-            row=10, column=0, columnspan=2, sticky='ew', pady=(10, 4))
+            row=10, column=0, columnspan=2, sticky='ew', pady=(6, 2))
 
         # Микрофон — выбор устройства
         ttk.Label(frm, text='Микрофон:').grid(row=11, column=0, **lbl_kw)
@@ -255,65 +255,75 @@ class RecorderApp(tk.Tk):
 
         # ── Controls ──────────────────────────────────────────────────────────
         frm_ctrl = ttk.Frame(self)
-        frm_ctrl.grid(row=1, column=0, sticky='ew', pady=(0, 10))
+        frm_ctrl.grid(row=1, column=0, sticky='ew', pady=(0, 4))
 
-        self._btn = ttk.Button(frm_ctrl, text='  ●  Начать запись  ', command=self._toggle)
-        self._btn.pack(side='left', ipadx=12, ipady=5)
+        # Составная кнопка записи: Frame + Canvas-кружок (цветной, отдельно от текста —
+        # обычная ttk/tk кнопка не умеет красить часть текста) + Label. Клик ловится
+        # на всех трёх, т.к. они визуально образуют одну кнопку.
+        self._btn = tk.Frame(frm_ctrl, bg='#e0e0e0', bd=1, relief='raised', cursor='hand2')
+        self._btn.pack(side='left', ipadx=4, ipady=2)
+        self._btn_dot = tk.Canvas(self._btn, width=16, height=16,
+                                   highlightthickness=0, bg='#e0e0e0')
+        self._btn_dot.pack(side='left', padx=(6, 4))
+        self._btn_dot_id = self._btn_dot.create_oval(2, 2, 14, 14, fill='#cc3333', outline='')
+        self._btn_label = tk.Label(self._btn, text='Начать запись',
+                                    bg='#e0e0e0', font=('Segoe UI', 8))
+        self._btn_label.pack(side='left', padx=(0, 6))
+        self._btn_enabled = True
+        for w in (self._btn, self._btn_dot, self._btn_label):
+            w.bind('<Button-1>', lambda e: self._toggle() if self._btn_enabled else None)
         self._var_auto_mic = tk.BooleanVar()
         self._btn_mic_mute = tk.Button(frm_ctrl, text='🎤 Микрофон',
                                         command=self._toggle_mic_mute, state='disabled',
                                         bg='#e0e0e0', activebackground='#d0d0d0',
-                                        relief='raised', bd=2, font=('Segoe UI', 9))
-        self._btn_mic_mute.pack(side='left', padx=(10, 0), ipadx=8, ipady=5)
+                                        relief='raised', bd=2, font=('Segoe UI', 8))
+        self._btn_mic_mute.pack(side='left', padx=(6, 0), ipadx=4, ipady=1)
         self._chk_auto_mic = tk.Checkbutton(frm_ctrl, text='Авто-вкл. по уровню',
                                              variable=self._var_auto_mic,
                                              state='disabled',
-                                             font=('Segoe UI', 9),
+                                             font=('Segoe UI', 8),
                                              fg='#555555', selectcolor='#e8ffe8',
                                              command=self._on_auto_mic_toggled)
-        self._chk_auto_mic.pack(side='left', padx=(8, 0))
-        self._btn_settings_toggle = tk.Canvas(frm_ctrl, width=28, height=28,
-                                               highlightthickness=0, bd=2, relief='raised',
+        self._chk_auto_mic.pack(side='left', padx=(6, 0))
+        self._btn_settings_toggle = tk.Canvas(frm_ctrl, width=18, height=18,
+                                               highlightthickness=0, bd=1, relief='raised',
                                                bg=self.cget('bg'), cursor='hand2')
         self._btn_settings_toggle.pack(side='right')
         self._btn_settings_toggle.bind('<Button-1>', lambda e: self._toggle_settings_panel())
         self._btn_settings_toggle.bind(
             '<Enter>', lambda e: self._show_tooltip(self._btn_settings_toggle, 'Настройки'))
         self._btn_settings_toggle.bind('<Leave>', self._hide_tooltip)
-        self._draw_gear_icon()
-        self._lbl_total_time = ttk.Label(frm_ctrl, text='', font=('Consolas', 11),
-                                          foreground='#e07000')
-        self._lbl_total_time.pack(side='right', padx=(0, 12))
+        self._draw_dots_icon()
 
         # ── Meters frame ──────────────────────────────────────────────────────
-        frm_m = ttk.LabelFrame(self, text='Уровни звука (RMS)', padding=(10, 6))
-        frm_m.grid(row=2, column=0, sticky='ew', pady=(0, 8))
+        frm_m = ttk.LabelFrame(self, text='Уровни звука (RMS)', padding=(6, 3))
+        frm_m.grid(row=2, column=0, sticky='ew', pady=(0, 4))
 
         # Микрофон
         ttk.Label(frm_m, text='Микрофон:', width=11, anchor='e').grid(
-            row=0, column=0, padx=(0, 6), pady=3)
+            row=0, column=0, padx=(0, 4), pady=1)
         self._canvas_mic = tk.Canvas(frm_m, width=METER_W, height=METER_H,
                                      bg='#1e1e1e', highlightthickness=1,
                                      highlightbackground='#555555')
-        self._canvas_mic.grid(row=0, column=1, pady=3)
+        self._canvas_mic.grid(row=0, column=1, pady=1)
         self._lbl_mic = ttk.Label(frm_m, text='  —  ', width=6,
-                                  anchor='e', font=('Consolas', 9))
-        self._lbl_mic.grid(row=0, column=2, padx=(6, 0))
+                                  anchor='e', font=('Consolas', 8))
+        self._lbl_mic.grid(row=0, column=2, padx=(4, 0))
 
         # Динамики
         ttk.Label(frm_m, text='Динамики:', width=11, anchor='e').grid(
-            row=1, column=0, padx=(0, 6), pady=3)
+            row=1, column=0, padx=(0, 4), pady=1)
         self._canvas_sys = tk.Canvas(frm_m, width=METER_W, height=METER_H,
                                      bg='#1e1e1e', highlightthickness=1,
                                      highlightbackground='#555555')
-        self._canvas_sys.grid(row=1, column=1, pady=3)
+        self._canvas_sys.grid(row=1, column=1, pady=1)
         self._lbl_sys = ttk.Label(frm_m, text='  —  ', width=6,
-                                  anchor='e', font=('Consolas', 9))
-        self._lbl_sys.grid(row=1, column=2, padx=(6, 0))
+                                  anchor='e', font=('Consolas', 8))
+        self._lbl_sys.grid(row=1, column=2, padx=(4, 0))
 
         # Верхний предел
         frm_max = ttk.Frame(frm_m)
-        frm_max.grid(row=2, column=0, columnspan=3, sticky='w', pady=(4, 0))
+        frm_max.grid(row=2, column=0, columnspan=3, sticky='w', pady=(2, 0))
         ttk.Label(frm_max, text='Верхний предел шкалы:').pack(side='left')
         self._var_meter_max = tk.IntVar()
         ttk.Spinbox(frm_max, from_=100, to=32768, increment=100,
@@ -322,37 +332,15 @@ class RecorderApp(tk.Tk):
                   text='  белая черта = порог тишины',
                   foreground=hint_fg).pack(side='left')
 
-        # ── Status row ────────────────────────────────────────────────────────
-        frm_status = ttk.Frame(self)
-        frm_status.grid(row=3, column=0, sticky='w', pady=(0, 6))
-        self._dot = tk.Label(frm_status, text='●', font=('Segoe UI', 13), fg='#aaaaaa')
-        self._dot.pack(side='left')
-        self._lbl_status = ttk.Label(frm_status, text='Готов к записи', font=('Segoe UI', 10))
-        self._lbl_status.pack(side='left', padx=(6, 0))
-        self._lbl_file_time = ttk.Label(frm_status, text='', font=('Consolas', 10),
-                                         foreground='#cc0000')
-        self._lbl_file_time.pack(side='left', padx=(10, 0))
-        self._btn_delete = ttk.Button(frm_status, text='🗑 Удалить WAV',
-                                      command=self._delete_recorded, state='disabled')
-        self._btn_delete.pack(side='left', padx=(12, 0))
-        self._btn_delete_mp3 = ttk.Button(frm_status, text='🗑 Удалить MP3',
-                                           command=self._delete_mp3, state='disabled')
-        self._btn_delete_mp3.pack(side='left', padx=(6, 0))
-        self._btn_open_fragments = ttk.Button(frm_status, text='📂 Открыть фрагменты',
-                                               command=self._open_folder)
-        self._btn_open_fragments.pack(side='left', padx=(6, 0))
-        ttk.Button(frm_status, text='📂 Открыть записи',
-                   command=self._open_full_dir).pack(side='left', padx=(6, 0))
-
         # ── Saved files list (скрыт во время записи, чтобы не занимать место) ──
-        frm_files = ttk.LabelFrame(self, text='Записанные файлы', padding=6)
-        frm_files.grid(row=4, column=0, sticky='nsew', pady=(0, 4))
+        frm_files = ttk.LabelFrame(self, text='Записанные файлы', padding=4)
+        frm_files.grid(row=4, column=0, sticky='nsew', pady=(0, 3))
         self.rowconfigure(4, weight=1)
         self.columnconfigure(0, weight=1)
         self._frm_files = frm_files
 
-        self._listbox = tk.Listbox(frm_files, width=72, height=7,
-                                   font=('Consolas', 9), activestyle='none')
+        self._listbox = tk.Listbox(frm_files, width=72, height=3,
+                                   font=('Consolas', 8), activestyle='none')
         sb = ttk.Scrollbar(frm_files, orient='vertical', command=self._listbox.yview)
         self._listbox.configure(yscrollcommand=sb.set)
         self._listbox.pack(side='left', fill='both', expand=True)
@@ -361,9 +349,9 @@ class RecorderApp(tk.Tk):
         self._listbox.bind('<Button-3>', self._on_file_right_click)
 
         self._lbl_files_hint = ttk.Label(
-            self, text='Двойной клик — открыть · правая кнопка — переименовать',
-            foreground='#888888', font=('Segoe UI', 8), padding=(0, 0))
-        self._lbl_files_hint.grid(row=5, column=0, sticky='w', pady=(0, 4))
+            self, text='Двойной клик — открыть · правая кнопка — меню',
+            foreground='#888888', font=('Segoe UI', 7), padding=(0, 0))
+        self._lbl_files_hint.grid(row=5, column=0, sticky='w', pady=(0, 3))
 
         self._apply_settings_panel_visibility()
         self._set_files_panel_visible(False)
@@ -448,7 +436,6 @@ class RecorderApp(tk.Tk):
         self._entry_dir.config(state=state)
         self._btn_dir_browse.config(state=state)
         self._btn_dir_open.config(state=state)
-        self._btn_open_fragments.config(state=state)
         self._spbx_silence_dur.config(state=state)
         self._chk_min_speech_on.config(state=state)
         self._spbx_min_record.config(state=state)
@@ -481,35 +468,14 @@ class RecorderApp(tk.Tk):
             self._frm_settings.grid_remove()
             self._btn_settings_toggle.config(relief='raised')
 
-    def _draw_gear_icon(self, color: str = '#333333'):
-        # Прошлая версия (звезда из чередующихся радиусов) выглядела как шип/цветок.
-        # Настоящая шестерёнка: сплошной круг-тело + прямоугольные зубья, повёрнутые
-        # каждый под свой угол (иначе зубья острые, а не квадратные).
+    def _draw_dots_icon(self, color: str = '#333333'):
+        # Три точки вместо шестерёнки — компактнее и проще на маленькой кнопке.
         c = self._btn_settings_toggle
         c.delete('all')
-        cx = cy = 14
-        body_r  = 7.0
-        bg = self.cget('bg')
-
-        c.create_oval(cx - body_r, cy - body_r, cx + body_r, cy + body_r,
-                      fill=color, outline='')
-
-        n_teeth  = 6
-        tooth_w  = 3.4    # ширина зуба (по касательной)
-        r1, r2   = body_r - 1.0, body_r + 3.5   # от (чуть внутри тела) до (наружу)
-        for i in range(n_teeth):
-            theta = 2 * math.pi * i / n_teeth
-            cos_t, sin_t = math.cos(theta), math.sin(theta)
-            pts = []
-            for r, t in ((r1, -tooth_w / 2), (r2, -tooth_w / 2),
-                         (r2,  tooth_w / 2), (r1,  tooth_w / 2)):
-                pts.append(cx + r * cos_t - t * sin_t)
-                pts.append(cy + r * sin_t + t * cos_t)
-            c.create_polygon(pts, fill=color, outline='')
-
-        hole_r = 2.6
-        c.create_oval(cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r,
-                      fill=bg, outline='')
+        cy = 9
+        r = 1.4
+        for cx in (5, 9, 13):
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline='')
 
     def _show_tooltip(self, widget, text):
         if getattr(self, '_tooltip_win', None):
@@ -617,9 +583,12 @@ class RecorderApp(tk.Tk):
         self._listbox.activate(idx)
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label='✏ Переименовать', command=self._rename_selected_file)
+        menu.add_command(label='📂 Открыть папку', command=self._open_selected_file_folder)
         menu.add_separator()
         menu.add_command(label='📤 Отправить в Transcript Fixer',
                           command=self._send_to_transcript_fixer)
+        menu.add_separator()
+        menu.add_command(label='🗑 Удалить', command=self._delete_selected_file)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -671,7 +640,6 @@ class RecorderApp(tk.Tk):
         self._listbox.delete(idx)
         self._listbox.insert(idx, f'{new_path.name:<46}  {rest}')
         self._listbox.selection_set(idx)
-        self._set_status(f'Переименовано: {new_path.name}', '#006600')
 
     def _send_to_transcript_fixer(self):
         sel = self._listbox.curselection()
@@ -683,7 +651,6 @@ class RecorderApp(tk.Tk):
             return
         name = Path(path).name
         self._open_transcript_fixer(path, name)
-        self._set_status(f'Transcript Fixer: отправлено в очередь — {name}', '#e07000')
 
     def _open_transcript_fixer(self, server_path: str = '', filename: str = ''):
         # Тот же способ открытия, что и в собственном start_app.bat у Transcript
@@ -716,66 +683,97 @@ class RecorderApp(tk.Tk):
                 return
         webbrowser.open(url)
 
-    def _delete_by_ext(self, ext: str, label: str, btn: ttk.Button):
-        files = [f for f in self._saved_files
-                 if os.path.isfile(f) and f.lower().endswith(ext)]
-        if not files:
-            messagebox.showinfo('Удаление', f'{label}-файлы не найдены.')
+    def _delete_selected_file(self):
+        sel = self._listbox.curselection()
+        if not sel or sel[0] >= len(self._saved_files):
             return
-        paths_text = '\n'.join(files)
-        if not messagebox.askokcancel(f'Удалить {label}-файлы',
-                                      f'Удалить {len(files)} {label}-файл(ов)?\n\n{paths_text}'):
+        idx = sel[0]
+        path = self._saved_files[idx]
+        if not os.path.isfile(path):
+            messagebox.showerror('Удаление', 'Файл не найден на диске.')
             return
-        errors = []
-        for f in files:
-            try:
-                os.remove(f)
-            except OSError as e:
-                errors.append(f'{os.path.basename(f)}: {e}')
-        if errors:
-            self._set_status(f'Ошибка удаления: {errors[0]}', '#cc0000')
-        else:
-            self._set_status(f'Удалено {len(files)} {label}-файл(ов)', '#555555')
-            btn.config(state='disabled')
-
-    def _delete_recorded(self):
-        self._delete_by_ext('.wav', 'WAV', self._btn_delete)
-
-    def _delete_mp3(self):
-        self._delete_by_ext('.mp3', 'MP3', self._btn_delete_mp3)
-
-    # ── Countdown autostart ───────────────────────────────────────────────────
-
-    def _start_countdown(self):
-        self._countdown_sec = 3
-        self._tick_countdown()
-
-    def _tick_countdown(self):
-        if self._countdown_sec <= 0:
-            self._countdown_job = None
-            self._start()
+        if not messagebox.askokcancel('Удалить файл', f'Удалить файл?\n\n{path}'):
             return
-        self._btn.config(text=f'  ✕  Отмена  ({self._countdown_sec})')
-        self._countdown_sec -= 1
-        self._countdown_job = self.after(1000, self._tick_countdown)
+        try:
+            os.remove(path)
+        except OSError as e:
+            messagebox.showerror('Удаление', f'Не удалось удалить: {e}')
+            return
+        del self._saved_files[idx]
+        self._listbox.delete(idx)
 
-    def _cancel_countdown(self):
-        if self._countdown_job:
-            self.after_cancel(self._countdown_job)
-            self._countdown_job = None
-        self._btn.config(text='  ●  Начать запись  ')
-        self._countdown_sec = 0
+    def _open_selected_file_folder(self):
+        sel = self._listbox.curselection()
+        if not sel or sel[0] >= len(self._saved_files):
+            return
+        path = self._saved_files[sel[0]]
+        if not os.path.isfile(path):
+            messagebox.showerror('Открыть папку', 'Файл не найден на диске.')
+            return
+        subprocess.Popen(['explorer', f'/select,{path}'])
 
     # ── Recording ─────────────────────────────────────────────────────────────
 
     def _toggle(self):
-        if self._countdown_job:
-            self._cancel_countdown()
-            return
         if not self._recording:
             self._start()
         else:
             self._stop()
+
+    def _set_record_btn(self, text: str, recording: bool = False, enabled: bool = True) -> None:
+        # Форма значка повторяет прежние текстовые ●/■: кружок — можно начать
+        # запись, квадрат — запись идёт (плавно пульсирует, пока не отключена).
+        self._btn_enabled = enabled
+        self._stop_btn_pulse()
+        if not enabled:
+            bg, dot_color = '#d5d5d5', '#aaaaaa'
+        else:
+            bg = '#ffe3e3' if recording else '#e0e0e0'   # очень светло-красный — идёт запись
+            dot_color = '#cc3333'
+        self._btn.config(bg=bg)
+        self._btn_dot.config(bg=bg)
+        self._btn_dot.delete('all')
+        if recording:
+            self._btn_dot_id = self._btn_dot.create_rectangle(3, 3, 13, 13,
+                                                                fill=dot_color, outline='')
+        else:
+            self._btn_dot_id = self._btn_dot.create_oval(2, 2, 14, 14,
+                                                          fill=dot_color, outline='')
+        self._btn_label.config(text=text, bg=bg)
+        if recording and enabled:
+            self._start_btn_pulse()
+
+    @staticmethod
+    def _lerp_color(c1: str, c2: str, t: float) -> str:
+        t = max(0.0, min(1.0, t))
+        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+        r = round(r1 + (r2 - r1) * t)
+        g = round(g1 + (g2 - g1) * t)
+        b = round(b1 + (b2 - b1) * t)
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    def _start_btn_pulse(self):
+        self._btn_pulse_step = 0
+        self._tick_btn_pulse()
+
+    def _tick_btn_pulse(self):
+        if not self._recording or not self._btn_enabled:
+            self._btn_pulse_job = None
+            return
+        step = self._btn_pulse_step
+        # Треугольная волна 0→1→0 за 40 тиков по 40мс (~1.6с цикл) — плавное
+        # затемнение/осветление вместо резкого переключения цвета.
+        t = step / 20 if step <= 20 else (40 - step) / 20
+        self._btn_dot.itemconfig(self._btn_dot_id,
+                                 fill=self._lerp_color('#661111', '#ff4444', t))
+        self._btn_pulse_step = (step + 1) % 40
+        self._btn_pulse_job = self.after(40, self._tick_btn_pulse)
+
+    def _stop_btn_pulse(self):
+        if self._btn_pulse_job:
+            self.after_cancel(self._btn_pulse_job)
+            self._btn_pulse_job = None
 
     def _update_mic_btn(self, muted: bool) -> None:
         if muted:
@@ -805,8 +803,6 @@ class RecorderApp(tk.Tk):
         s = self._collect()
         _save_settings(s)
         self._settings = s
-        self._btn_delete.config(state='disabled')
-        self._btn_delete_mp3.config(state='disabled')
         self._reset_meters()
         self._set_files_panel_visible(False)
 
@@ -827,7 +823,6 @@ class RecorderApp(tk.Tk):
                 fragment_record=s['fragment_record_enabled'],
                 mic_device=None if s['mic_device_index'] == -1 else s['mic_device_index'],
                 sys_device=None if s['sys_device_index'] == -1 else s['sys_device_index'],
-                on_status=self._cb_status,
                 on_file_saved=self._cb_file,
                 on_idle_timeout=self._cb_idle_timeout,
                 on_levels=self._cb_levels,
@@ -838,59 +833,38 @@ class RecorderApp(tk.Tk):
             return
 
         self._recording = True
-        self._btn.config(text='  ■  Остановить запись  ')
+        self._set_record_btn('Остановить  (0:00)', recording=True, enabled=True)
         # Старт с замьюченным микрофоном если включён авто-вкл
         start_muted = self._var_auto_mic.get()
         self._recorder._mic_muted = start_muted
         self._update_mic_btn(start_muted)
         self._btn_mic_mute.config(state='normal')
         self._chk_auto_mic.config(state='normal')
-        self._set_status('Ожидание речи...', '#888888')
-        self._start_blink('#888888')
         self._start_timer()
 
     def _stop(self):
         self._recording = False
-        self._btn.config(state='disabled', text='  ■  Остановить запись  ')
-        self._stop_blink()
-        self._set_status('Остановка...', '#e07000')
+        self._set_record_btn(self._btn_label['text'], recording=True, enabled=False)
 
         def _do():
             try:
                 files = self._recorder.stop() if self._recorder else []
             except Exception as e:
                 files = []
+                # Python удаляет переменную `except ... as e` сразу после блока —
+                # если захватить её лямбдой напрямую, self.after() вызовет лямбду
+                # позже и получит NameError вместо сообщения об ошибке.
+                err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
-                    'Ошибка остановки', str(e)))
+                    'Ошибка остановки', err_msg))
             self.after(0, self._on_stopped, files)
 
         threading.Thread(target=_do, daemon=True).start()
 
     def _on_stopped(self, files: list[str]):
-        n = len(files)
-        self._finish_recording(f'Готово. Сохранено файлов: {n}',
-                                '#005500' if n else '#555555')
+        self._finish_recording()
 
     # ── Callbacks from recorder thread ────────────────────────────────────────
-
-    def _cb_status(self, msg: str):
-        def _upd():
-            if '[REC]' in msg:
-                self._file_start_time = time.monotonic()
-                self._set_status('Запись...', '#cc0000')
-                self._start_blink('#cc0000')
-            elif 'Ожидание' in msg:
-                self._file_start_time = None
-                self._lbl_file_time.config(text='')
-                self._set_status('Ожидание речи...', '#888888')
-                self._start_blink('#888888')
-            elif 'Saved' in msg:
-                self._file_start_time = None
-                self._lbl_file_time.config(text='')
-                parts = msg.strip().split(': ', 1)
-                name = Path(parts[1]).name if len(parts) > 1 else msg.strip()
-                self._set_status(f'Сохранено: {name}', '#006600')
-        self.after(0, _upd)
 
     def _cb_file(self, path: str, duration_sec: float):
         def _upd():
@@ -927,9 +901,7 @@ class RecorderApp(tk.Tk):
 
     def _handle_idle_stop(self):
         self._recording = False
-        self._stop_blink()
-        self._btn.config(state='disabled')
-        self._set_status('Авто-стоп: долгая тишина...', '#e07000')
+        self._set_record_btn(self._btn_label['text'], recording=True, enabled=False)
 
         def _do():
             if self._recorder:
@@ -939,49 +911,56 @@ class RecorderApp(tk.Tk):
         threading.Thread(target=_do, daemon=True).start()
 
     def _on_idle_done(self):
-        n = len(self._saved_files)
-        self._finish_recording(f'Авто-стоп: тишина. Файлов: {n}', '#555555')
+        self._finish_recording()
 
-    def _finish_recording(self, status_text: str, status_color: str):
+    def _finish_recording(self):
         self._recorder = None
-        self._btn.config(state='normal', text='  ●  Начать запись  ')
+        self._set_record_btn('Начать запись', recording=False, enabled=True)
         self._update_mic_btn(False)
         self._btn_mic_mute.config(state='disabled')
         self._chk_auto_mic.config(state='disabled')
-        self._dot.config(fg='#aaaaaa')
-        self._set_status(status_text, status_color)
-        has_wav = any(f.lower().endswith('.wav') for f in self._saved_files)
-        has_mp3 = any(f.lower().endswith('.mp3') for f in self._saved_files)
-        self._btn_delete.config(state='normal' if has_wav else 'disabled')
-        self._btn_delete_mp3.config(state='normal' if has_mp3 else 'disabled')
         self._reset_meters()
         self._stop_timer()
         self._set_files_panel_visible(True)
 
     # ── Meters ────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _segment_color(index: int, total: int) -> str:
+        # Цвет как в эквалайзерах музыкальных центров: зелёные сегменты внизу
+        # шкалы, жёлтые ближе к верху, красные на пике — по позиции сегмента,
+        # а не по текущему порогу тишины (тот показан отдельно белой чертой).
+        frac = index / max(1, total - 1)
+        if frac < 0.6:
+            return '#33aa55'
+        if frac < 0.85:
+            return '#cc9900'
+        return '#cc3333'
+
     def _draw_meter(self, canvas: tk.Canvas, label: ttk.Label, rms: float, muted: bool = False):
         threshold = float(max(1, self._var_rms.get()))
         max_rms   = float(max(1, self._var_meter_max.get()))
+        # Уровень отображается всегда, даже при выключенном микрофоне (как и
+        # раньше со сплошной заливкой) — просто закрашенные сегменты серые,
+        # а не по обычной зелёной/жёлтой/красной шкале.
+        filled = int(round(METER_SEGMENTS * min(1.0, rms / max_rms)))
 
-        fill_x = int(METER_W * min(1.0, rms / max_rms))
-        thr_x  = int(METER_W * min(1.0, threshold / max_rms))
-
-        if muted:
-            color = '#555555'        # серый — микрофон отключён
-        elif rms >= threshold:
-            color = '#cc3333'        # красный — выше порога
-        elif rms >= threshold * 0.65:
-            color = '#cc9900'        # жёлтый — приближается к порогу
-        else:
-            color = '#33aa55'        # зелёный — ниже порога
+        seg_total_w = METER_W / METER_SEGMENTS
+        seg_w = max(1.0, seg_total_w - METER_GAP)
 
         canvas.delete('all')
-        if fill_x > 0:
-            canvas.create_rectangle(0, 0, fill_x, METER_H, fill=color, outline='')
+        for i in range(METER_SEGMENTS):
+            x0 = i * seg_total_w
+            if i >= filled:
+                color = '#333333'
+            else:
+                color = '#777777' if muted else self._segment_color(i, METER_SEGMENTS)
+            canvas.create_rectangle(x0, 0, x0 + seg_w, METER_H, fill=color, outline='')
+
         # Маркер порога тишины
+        thr_x = METER_W * min(1.0, threshold / max_rms)
         if 0 < thr_x <= METER_W:
-            canvas.create_line(thr_x, 0, thr_x, METER_H, fill='white', width=2)
+            canvas.create_line(thr_x, 0, thr_x, METER_H, fill='white', width=1)
 
         label.config(text='ОТКЛ' if muted else f'{int(rms):>5}',
                      foreground='#cc2222' if muted else '')
@@ -996,7 +975,6 @@ class RecorderApp(tk.Tk):
 
     def _start_timer(self):
         self._record_start_time = time.monotonic()
-        self._file_start_time   = None
         self._tick_timer()
 
     def _tick_timer(self):
@@ -1004,11 +982,8 @@ class RecorderApp(tk.Tk):
             return
         total = time.monotonic() - self._record_start_time
         tm, ts = divmod(int(total), 60)
-        self._lbl_total_time.config(text=f'Общее:  {tm}:{ts:02d}')
-        if self._file_start_time is not None:
-            ft = time.monotonic() - self._file_start_time
-            fm, fs = divmod(int(ft), 60)
-            self._lbl_file_time.config(text=f'{fm}:{fs:02d}')
+        # Общее время записи показывается прямо в тексте кнопки «Остановить».
+        self._btn_label.config(text=f'Остановить  ({tm}:{ts:02d})')
         self._timer_job = self.after(1000, self._tick_timer)
 
     def _stop_timer(self):
@@ -1016,36 +991,10 @@ class RecorderApp(tk.Tk):
             self.after_cancel(self._timer_job)
             self._timer_job = None
         self._record_start_time = None
-        self._file_start_time   = None
-        self._lbl_total_time.config(text='')
-        self._lbl_file_time.config(text='')
-
-    def _set_status(self, text: str, color: str = ''):
-        self._lbl_status.config(text=text, foreground=color)
-
-    def _start_blink(self, color: str):
-        self._stop_blink()
-        self._blink_color = color
-        self._blink_state = True
-        self._do_blink()
-
-    def _do_blink(self):
-        if not self._recording:
-            return
-        self._dot.config(fg=self._blink_color if self._blink_state else '#dddddd')
-        self._blink_state = not self._blink_state
-        self._blink_job = self.after(550, self._do_blink)
-
-    def _stop_blink(self):
-        if self._blink_job:
-            self.after_cancel(self._blink_job)
-            self._blink_job = None
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def _on_close(self):
-        if self._countdown_job:
-            self.after_cancel(self._countdown_job)
         if self._recording and self._recorder:
             self._recorder.stop()
         self.destroy()
