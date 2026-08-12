@@ -12,7 +12,7 @@ import tkinter as tk
 import urllib.parse
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from recorder import Recorder
 
@@ -614,6 +614,101 @@ class RecorderApp(tk.Tk):
         finally:
             menu.grab_release()
 
+    def _ask_new_filename(self, initial: str) -> str | None:
+        # Свой диалог вместо simpledialog.askstring — у стандартного почему-то
+        # не срабатывает Ctrl+V на некоторых раскладках/системах (штатная
+        # виртуальная привязка <<Paste>> молчит). Здесь вставка явно завязана
+        # на буфер обмена (несколько сочетаний клавиш) + пункт в контекстном
+        # меню по правому клику — так работает гарантированно, не полагаясь
+        # на дефолтные Tk-бинды.
+        dlg = tk.Toplevel(self)
+        dlg.title('Переименовать')
+        dlg.transient(self)
+        dlg.resizable(False, False)
+
+        ttk.Label(dlg, text='Новое имя файла (без расширения):').pack(
+            padx=10, pady=(10, 4), anchor='w')
+        var = tk.StringVar(value=initial)
+        entry = ttk.Entry(dlg, textvariable=var, width=42)
+        entry.pack(padx=10, pady=(0, 8), fill='x')
+        entry.select_range(0, 'end')
+        entry.icursor('end')
+
+        result: dict[str, str | None] = {'value': None}
+
+        def _paste(_event=None):
+            try:
+                text = dlg.clipboard_get()
+            except tk.TclError:
+                return 'break'
+            try:
+                entry.delete('sel.first', 'sel.last')
+            except tk.TclError:
+                pass
+            entry.insert('insert', text)
+            return 'break'
+
+        def _copy(_event=None):
+            try:
+                sel = entry.selection_get()
+            except tk.TclError:
+                return 'break'
+            dlg.clipboard_clear()
+            dlg.clipboard_append(sel)
+            return 'break'
+
+        def _cut(_event=None):
+            _copy()
+            try:
+                entry.delete('sel.first', 'sel.last')
+            except tk.TclError:
+                pass
+            return 'break'
+
+        def _select_all(_event=None):
+            entry.select_range(0, 'end')
+            entry.icursor('end')
+            return 'break'
+
+        for seq in ('<Control-v>', '<Control-V>', '<Shift-Insert>'):
+            entry.bind(seq, _paste)
+        for seq in ('<Control-c>', '<Control-C>', '<Control-Insert>'):
+            entry.bind(seq, _copy)
+        for seq in ('<Control-x>', '<Control-X>'):
+            entry.bind(seq, _cut)
+        for seq in ('<Control-a>', '<Control-A>'):
+            entry.bind(seq, _select_all)
+
+        ctx_menu = tk.Menu(entry, tearoff=0)
+        ctx_menu.add_command(label='Вырезать', command=_cut)
+        ctx_menu.add_command(label='Копировать', command=_copy)
+        ctx_menu.add_command(label='Вставить', command=_paste)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label='Выделить всё', command=_select_all)
+        entry.bind('<Button-3>', lambda e: ctx_menu.tk_popup(e.x_root, e.y_root))
+
+        def _ok(_event=None):
+            result['value'] = var.get()
+            dlg.destroy()
+
+        def _cancel(_event=None):
+            result['value'] = None
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg)
+        btns.pack(padx=10, pady=(0, 10), fill='x')
+        ttk.Button(btns, text='Отмена', command=_cancel).pack(side='right')
+        ttk.Button(btns, text='OK', command=_ok).pack(side='right', padx=(0, 6))
+
+        entry.bind('<Return>', _ok)
+        dlg.bind('<Escape>', _cancel)
+        dlg.protocol('WM_DELETE_WINDOW', _cancel)
+
+        entry.focus_set()
+        dlg.grab_set()
+        dlg.wait_window(dlg)
+        return result['value']
+
     def _rename_selected_file(self):
         sel = self._listbox.curselection()
         if not sel or sel[0] >= len(self._saved_files):
@@ -624,9 +719,7 @@ class RecorderApp(tk.Tk):
             messagebox.showerror('Переименование', 'Файл не найден на диске.')
             return
 
-        new_stem = simpledialog.askstring(
-            'Переименовать', 'Новое имя файла (без расширения):',
-            initialvalue=old.stem, parent=self)
+        new_stem = self._ask_new_filename(old.stem)
         if new_stem is None:
             return
         new_stem = new_stem.strip()
